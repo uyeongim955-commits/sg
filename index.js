@@ -1,12 +1,25 @@
-// 성좌게임 SVG 워커 sg v3 — 단일 파일, import 없음 (Cloudflare Workers 모듈 문법)
+// 성좌게임 SVG 워커 sg v4 — 단일 파일, import 없음 (Cloudflare Workers 모듈 문법)
 //   / 또는 /f  플레이어넷   목록: ?d=7/6+14:20&o=카더라주의&l=!제목~닉;?제목~*닉;제목~닉
 //                         글  : ?t=제목&w=닉&d=7/6+14:20&s=본문&c=ㅇㅇ~댓글;↳ㅇㅇ~반박
-//                         같은 제목이면 목록 행과 글 화면의 조회·추천·댓글 수가 같게 나온다
+//                         디자인은 여명각인 dawn 커뮤니티(만화인사이드)와 같음. 바뀐 건 아래 SITE 문구뿐
 //   /s  공략 현황판       ?d=7/6+14:20&z=0120&u=중&k=*이름~1;하준~1&h=공지
 // 응답은 전부 image/svg+xml. 마크다운 ![](URL) 로 그대로 표시된다.
 
+// ── 게시판 문구 (여기만 고치면 이름이 바뀜) ──
+const SITE = {
+  name: '플레이어넷', suffix: '.com',              // 원본: 만화인사이드 .com
+  minor: '마이너 갤러리',
+  search: '갤러리 통합검색',
+  nav: ['갤러리', '마이너갤', '미니갤', '공략갤', '갤로그'],   // 원본: … 만화갤 …
+  navRight: '제773회 진행 중 · 스포일러 주의',      // 원본: 연재 중 · 스포일러 주의
+  gallery: '제773회 성좌게임 갤러리',               // 원본: 새벽의 태양 갤러리
+  footer: '플레이어넷 · 제773회 성좌게임 마이너 갤러리 · 게시물은 플레이어 개인 의견이며 스포일러를 포함할 수 있음',
+  admin: '운영자', must: '필독'
+};
+
 const FONT = "Pretendard,'Apple SD Gothic Neo','Noto Sans KR','Noto Sans CJK KR','Malgun Gothic',sans-serif";
-const W = 720;
+const W = 720;    // 현황판·안내 카드 폭
+const BW = 1000;  // 게시판 폭(원본과 같은 비율)
 
 export default {
   async fetch(request) {
@@ -46,7 +59,9 @@ function charWidth(ch) {
     if (ch === ' ') return 0.3;
     if ('il.,:;\'|!`'.includes(ch)) return 0.28;
     if ('mwMW@'.includes(ch)) return 0.86;
-    if (/[A-Z0-9]/.test(ch)) return 0.62;
+    if ('()[]'.includes(ch)) return 0.34;
+    if (/[0-9]/.test(ch)) return 0.58;
+    if (/[A-Z]/.test(ch)) return 0.62;
     return 0.53;
   }
   if (c >= 0x1f000) return 1.15;                       // 이모지
@@ -56,45 +71,58 @@ function charWidth(ch) {
 }
 const measure = (s, size) => Array.from(s).reduce((a, ch) => a + charWidth(ch), 0) * size;
 
+// 원본 dawn 워커식 폭 어림(한글 1.06em·공백 0.3em·영숫자 0.55em).
+// [댓글수]·M 배지 위치와 본문 줄바꿈 길이가 원본과 같게 나오도록 이걸 쓴다
+function dEst(s, size) {
+  let w = 0;
+  for (const ch of Array.from(s)) {
+    const c = ch.codePointAt(0);
+    w += ch === ' ' ? 0.3 : c < 0x80 ? 0.55 : 1.06;
+  }
+  return w * size;
+}
+
 function truncate(s, size, max) {
   if (measure(s, size) <= max) return s;
-  const chars = Array.from(s);
   let out = '';
-  for (const ch of chars) {
+  for (const ch of Array.from(s)) {
     if (measure(out + ch + '…', size) > max) break;
     out += ch;
   }
   return out + '…';
 }
 
-// 단어 단위 줄바꿈(긴 단어는 글자 단위), 줄 수 초과 시 말줄임
-function wrap(s, size, max, maxLines = 99) {
+// 단어 단위 줄바꿈(긴 단어는 글자 단위). fit(문자열) 이 폭 판정
+function wrapBy(s, fit, maxLines = 99) {
   const lines = [];
   let line = '';
-  const push = () => { lines.push(line); line = ''; };
   for (const word of s.split(' ')) {
-    const candidate = line ? line + ' ' + word : word;
-    if (measure(candidate, size) <= max) { line = candidate; continue; }
-    if (line) push();
-    if (measure(word, size) <= max) { line = word; continue; }
+    const cand = line ? line + ' ' + word : word;
+    if (fit(cand)) { line = cand; continue; }
+    if (line) { lines.push(line); line = ''; }
+    if (fit(word)) { line = word; continue; }
     for (const ch of Array.from(word)) {
-      if (measure(line + ch, size) > max) push();
+      if (!fit(line + ch)) { lines.push(line); line = ''; }
       line += ch;
     }
   }
-  if (line) push();
+  if (line) lines.push(line);
+  if (!lines.length) lines.push('');
   if (lines.length > maxLines) {
     const kept = lines.slice(0, maxLines);
-    kept[maxLines - 1] = truncate(kept[maxLines - 1] + '…', size, max);
+    let last = kept[maxLines - 1];
+    while (last && !fit(last + '…')) last = Array.from(last).slice(0, -1).join('');
+    kept[maxLines - 1] = last + '…';
     return kept;
   }
-  return lines.length ? lines : [''];
+  return lines;
 }
+const wrap = (s, size, max, maxLines) => wrapBy(s, t => measure(t, size) <= max, maxLines);
 
 function hash(s) {
   let h = 2166136261;
   for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
-  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; // 비슷한 제목끼리도 고르게
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
   return h >>> 0;
 }
 const pick = (seed, min, max) => min + (hash(seed) % (max - min + 1));
@@ -102,54 +130,14 @@ const comma = n => n.toLocaleString('en-US');
 
 const T = (x, y, size, fill, text, extra = '') =>
   `<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" ${extra}>${esc(text)}</text>`;
+const R = (x, y, w, h, fill, extra = '') => `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" ${extra}/>`;
 
-function frame(h, body, bg = '#eef1f6') {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}" font-family="${FONT}">` +
-    `<rect width="${W}" height="${h}" fill="${bg}"/>${body}</svg>`;
-}
-
-// 닉: "*고닉" 고닉 / "ㅇㅇ@C+" 등급 지정 / "ㅇㅇ(C+)" 텍스트판 호환 / 미지정이면 등급 자동
-// URL에선 +가 공백으로 풀리므로 "@C " 처럼 등급 뒤 공백은 +로 복원한다.
-const GRADES = [['F', 6], ['E', 30], ['E+', 14], ['D', 22], ['D+', 12], ['C', 8], ['C+', 4], ['B', 2.5], ['B+', 1], ['A', 0.5]];
-function autoGrade(seed) {
-  let r = (hash(seed) % 1000) / 10;
-  for (const [g, p] of GRADES) { if ((r -= p) < 0) return g; }
-  return 'E';
-}
-function parseNick(raw, seed = '') {
-  let s = String(raw ?? '').replace(/^\s+/, '');
-  const fixed = s.startsWith('*');
-  if (fixed) s = s.slice(1);
-  let grade = '';
-  let m = s.match(/^(.*?)@\s*(EX|[A-FS])(\+|\s)?\s*$/i);
-  if (m) { s = m[1]; grade = m[2].toUpperCase() + (m[3] ? '+' : ''); }
-  else if ((m = s.match(/^(.*?)\(\s*(EX|[A-FS])(\+|\s)?\s*\)\s*$/i))) { s = m[1]; grade = m[2].toUpperCase() + (m[3] ? '+' : ''); }
-  const name = clean(s, 16) || (fixed ? '고닉' : 'ㅇㅇ');
-  if (!grade && !fixed) grade = autoGrade(name + '|' + seed);
-  return { name, grade, fixed };
-}
-// 본문 속 "C 급"(원래 C+급) 복원
-const fixPlus = t => t.replace(/(^|[^A-Za-z])(EX|[A-FS]) (?=급)/g, '$1$2+');
-function nickSVG(x, y, nick, size = 17) {
-  const { name, grade, fixed } = nick;
-  let out = '';
-  let cx = x;
-  if (fixed) {
-    out += `<rect x="${cx}" y="${y - size + 2}" width="${size + 2}" height="${size + 2}" rx="4" fill="#2a3a78"/>` +
-      T(cx + (size + 2) / 2, y - 1, size - 4, '#fff', '✦', 'text-anchor="middle" font-weight="700"');
-    cx += size + 8;
-  }
-  out += T(cx, y, size, fixed ? '#2a3a78' : '#3b4252', name, 'font-weight="700"');
-  cx += measure(name, size) + 6;
-  if (grade) {
-    const gw = measure(grade, size - 4) + 12;
-    out += `<rect x="${cx}" y="${y - size + 3}" width="${gw}" height="${size}" rx="${size / 2}" fill="#e3e8f2"/>` +
-      T(cx + gw / 2, y - 1, size - 4, '#56607a', grade, 'text-anchor="middle" font-weight="600"');
-    cx += gw;
-  }
-  return { svg: out, end: cx };
+function frame(h, body, bg = '#eef1f6', w = W) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="${FONT}">` +
+    `<rect width="${w}" height="${h}" fill="${bg}"/>${body}</svg>`;
 }
 
+// 안내·오류 카드용 머리띠
 function header(title, right) {
   return `<rect width="${W}" height="64" fill="#18213d"/>` +
     `<rect y="64" width="${W}" height="3" fill="#c9a24a"/>` +
@@ -158,160 +146,252 @@ function header(title, right) {
     (right ? T(W - 28, 40, 16, '#aeb9d6', right, 'text-anchor="end"') : '');
 }
 
+// 본문 속 "C 급"(원래 C+급) 복원 — URL에선 +가 공백으로 풀림
+const fixPlus = t => t.replace(/(^|[^A-Za-z])(EX|[A-FS]) (?=급)/g, '$1$2+');
+
+// ───────────────────────── 플레이어넷 (dawn 커뮤니티 디자인) ─────────────────────────
+const C = {
+  navy: '#3b4a8d', icon: '#3e4b86',
+  logo: '#1f2330', logoSub: '#8f92a1', minor: '#90949d', placeholder: '#9da0a7',
+  navRight: '#b5bff2', title: '#13171a', badgeBg: '#e8ebf4', badgeFg: '#505579',
+  divider: '#e8e9ed', tableTop: '#e1e3e8', headBg: '#f7f8fa', headText: '#6e7279',
+  noticeBg: '#fbfbfd', noticeIcon: '#e0684f', noticeText: '#202330', adminText: '#363c4a',
+  rowLine: '#eef0f3', tableEnd: '#e6e8ec', num: '#979aa2', tag: '#6e7279', rowTitle: '#23282e',
+  cnt: '#c0392b', sqRed: '#e97c66', sqGreen: '#6fb07b', gonick: '#383c47', nick: '#74787d', ip: '#aeb1b6',
+  cell: '#73777c', footer: '#aeb2b6',
+  postTitle: '#13161a', meta: '#8e9296', metaName: '#373c47', sep: '#e9ebef', body: '#242527',
+  upBg: '#feecec', upLine: '#f0cfca', upText: '#bf4a3f', downBg: '#eef1f6', downLine: '#dde2ea', downText: '#6d747a',
+  label: '#141719', cmtNick: '#42474a', cmtText: '#2e2f31', reply: '#bbbcc0'
+};
+const Y0 = 26;          // 검색창 윗변
+const L = 36, RT = 964; // 본문 좌우 끝
+
+const titleKey = text => text.replace(/\s+/g, '');
+
+// 닉: "*고닉" → 아이콘+굵은 이름 / "ㅇㅇ"·"유동닉" → 이름(IP 자동). "ㅇㅇ(12.34)"처럼 주면 그 IP 사용
+function parseNick(raw, seed = '') {
+  let s = clean(raw, 40);
+  const fixed = s.startsWith('*');
+  if (fixed) s = s.slice(1).trim();
+  s = s.replace(/@\s*(EX|[A-FS])(\+|\s)?\s*$/i, '').trim();          // 예전 등급 표기는 버림
+  let ip = '';
+  const m = s.match(/^(.*?)\(\s*(\d{1,3}(?:\.\d{1,3})?)\s*\)\s*$/);
+  if (m) { s = m[1].trim(); ip = m[2]; }
+  else s = s.replace(/\([^)]*\)\s*$/, '').trim();
+  const name = clean(s, 16) || (fixed ? '고닉' : 'ㅇㅇ');
+  if (!fixed && !ip) { const h = hash('ip|' + name + '|' + seed); ip = `${100 + (h % 124)}.${(h >>> 8) % 256}`; }
+  return { name, ip: fixed ? '' : `(${ip})`, fixed };
+}
+
+function personIcon(x, top) {
+  return `<g transform="translate(${x} ${top})"><rect width="13" height="13" rx="2.6" fill="${C.icon}"/>` +
+    `<circle cx="6.5" cy="4.9" r="2.3" fill="#fff"/><path d="M2.9 11.3c.3-2.3 1.8-3.6 3.6-3.6s3.3 1.3 3.6 3.6z" fill="#fff"/></g>`;
+}
+
+// 닉 묶음 폭 / 그리기. style: 'list'(목록 글쓴이) | 'post'(글·댓글)
+const BOLD = 1.04;
+function nickWidth(n, size = 13) {
+  return n.fixed ? 19 + measure(n.name, size) * BOLD : measure(n.name, size) * (BOLD) + measure(n.ip, size);
+}
+// 목록 글쓴이 칸이 옆 칸을 침범하지 않게 이름만 줄임(IP는 유지)
+function fitNick(n, maxW, size = 13) {
+  if (nickWidth(n, size) <= maxW) return n;
+  const room = maxW - (n.fixed ? 19 : measure(n.ip, size)) ;
+  return { ...n, name: truncate(n.name, size * BOLD, room) };
+}
+function nickSVG(x, base, n, style, size = 13) {
+  if (n.fixed) {
+    return personIcon(x, base - 11.4) +
+      T(x + 19, base, size, style === 'list' ? C.gonick : C.metaName, n.name, 'font-weight="700"');
+  }
+  const nameFill = style === 'list' ? C.nick : C.cmtNick;
+  const weight = style === 'list' ? '400' : '700';
+  return `<text x="${x}" y="${base}" font-size="${size}" fill="${nameFill}" font-weight="${weight}">${esc(n.name)}` +
+    `<tspan fill="${C.ip}" font-weight="400">${esc(n.ip)}</tspan></text>`;
+}
+
+// 목록 행과 글 화면이 같은 수치를 쓰도록 제목으로 시드
+function postStats(text, concept) {
+  const seed = '#' + titleKey(text);
+  const views = pick(seed + 'v', 240, 9200);
+  const recs = concept ? pick(seed + 'r', 30, 160) : pick(seed + 'r', 0, 60);
+  const down = pick(seed + 'd', 0, Math.max(3, Math.floor(recs / 3)));
+  const cmts = pick(seed + 'c', 0, 14);            // 2 미만이면 목록에 [n] 안 붙음
+  return { views, recs, down, cmts };
+}
+
 function titleParts(raw) {
   let t = fixPlus(clean(raw, 80)) || '제목 없음';
   let tag = '';
   if (t.startsWith('!')) { tag = '개념'; t = t.slice(1).trim(); }
   else if (t.startsWith('?')) { tag = '질문'; t = t.slice(1).trim(); }
-  return { tag, text: t };
-}
-// 목록 1행의 상위 글과 2~4행 글 화면이 같은 수치를 쓰도록 제목만으로 시드를 잡는다
-const titleKey = text => text.replace(/\s+/g, '');
-function postStats(text, tag) {
-  const seed = '#' + titleKey(text);
-  const views = pick(seed + 'v', 180, 12000);
-  const recs = tag === '개념' ? pick(seed + 'r', 180, 520) : pick(seed + 'r', 2, 160);
-  const down = pick(seed + 'd', 0, Math.max(2, Math.floor(recs / (tag === '개념' ? 8 : 3))));
-  const cmts = pick(seed + 'c', 8, tag === '개념' ? 180 : 120);
-  return { views, recs, down, cmts };
-}
-function tagSVG(x, y, tag, size = 15) {
-  if (!tag) return { svg: '', w: 0 };
-  const color = tag === '개념' ? '#d8433b' : '#2f6fdb';
-  const w = measure(tag, size) + 14;
-  return {
-    svg: `<rect x="${x}" y="${y - size - 1}" width="${w}" height="${size + 8}" rx="5" fill="${color}"/>` +
-      T(x + w / 2, y + 1, size, '#fff', tag, 'text-anchor="middle" font-weight="700"'),
-    w: w + 8
-  };
+  return { tag, text: t || '제목 없음' };
 }
 
-// ───────────────────────── /f 목록 ─────────────────────────
+function timeMinus(d, i) {
+  const m = String(d).match(/(\d{1,2}):(\d{2})/);
+  if (!m) return String(d).split(' ')[0] || '';
+  let t = ((+m[1]) * 60 + (+m[2]) - i) % 1440;
+  if (t < 0) t += 1440;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
+// 공통 머리: 로고·검색창·네이비 메뉴·갤러리 제목·M 배지·구분선
+function boardHead() {
+  let s = `<text x="${L}" y="${Y0 + 20.5}" font-size="22" font-weight="800" fill="${C.logo}">${esc(SITE.name)}` +
+    `<tspan fill="${C.logoSub}" font-weight="600">${esc(SITE.suffix)}</tspan></text>`;
+  s += T(239, Y0 + 21.5, 12, C.minor, SITE.minor, 'font-weight="600"');
+  s += `<rect x="429.75" y="${Y0 + 0.75}" width="300.5" height="30.5" rx="2" fill="#fff" stroke="${C.navy}" stroke-width="1.5"/>` +
+    `<rect x="700.5" y="${Y0}" width="31" height="32" rx="2" fill="${C.navy}"/>` +
+    `<circle cx="714.3" cy="${Y0 + 14.3}" r="5.3" fill="none" stroke="#fff" stroke-width="1.9"/>` +
+    `<path d="M718.2 ${Y0 + 18.2}l4.3 4.3" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/>` +
+    T(444.5, Y0 + 21.5, 13, C.placeholder, SITE.search);
+  s += R(0, Y0 + 40, BW, 37, C.navy);
+  let x = L;
+  for (const item of SITE.nav) { s += T(x, Y0 + 65, 13, '#ffffff', item, 'font-weight="700"'); x += measure(item, 13) * BOLD + 41.5; }
+  s += T(RT, Y0 + 65, 12, C.navRight, SITE.navRight, 'text-anchor="end"');
+  s += T(L, Y0 + 114.5, 24, C.title, SITE.gallery, 'font-weight="800"');
+  const bx = L + dEst(SITE.gallery, 24) + 13;
+  s += `<circle cx="${bx.toFixed(1)}" cy="${Y0 + 106.8}" r="10" fill="${C.badgeBg}"/>` +
+    T(bx.toFixed(1), Y0 + 110.9, 11, C.badgeFg, 'M', 'text-anchor="middle" font-weight="700"');
+  s += R(L, Y0 + 132, RT - L, 2, C.divider);
+  return s;
+}
+
+function boardFoot(contentBottom) {
+  const fy = Math.max(Y0 + 611.5, contentBottom + 50);
+  return { svg: T(L, fy, 11, C.footer, SITE.footer), h: Math.ceil(fy + 22.5) };
+}
+
+// 목록 열 위치(가운데 정렬 기준점)
+const COL = { num: 69, tag: 147, title: 196, writer: 711, date: 827.5, views: 891, recs: 944 };
+const ROW_H = 34;
+
+// ───────────────────────── 목록 ─────────────────────────
 function boardList(q) {
   const date = clean(q.get('d'), 20);
-  const notice = clean(q.get('o'), 60);
+  const notice = clean(q.get('o'), 40);
   const items = String(q.get('l') ?? '').slice(0, 1600).split(';').filter(x => x.trim()).slice(0, 8);
-  let y = 67;
-  let body = header('플레이어넷', date);
-  // 탭
-  body += `<rect y="${y}" width="${W}" height="50" fill="#ffffff"/>`;
-  ['전체글', '개념글', '공지'].forEach((t, i) => {
-    const x = 28 + i * 96;
-    body += T(x, y + 32, 17, i === 0 ? '#18213d' : '#8a93a8', t, i === 0 ? 'font-weight="700"' : '');
-    if (i === 0) body += `<rect x="${x}" y="${y + 44}" width="${measure(t, 17)}" height="3" fill="#18213d"/>`;
-  });
-  y += 50;
-  body += `<rect y="${y}" width="${W}" height="1" fill="#dfe4ee"/>`;
+  let s = boardHead();
+  const top = Y0 + 152;
+  s += R(L, top, RT - L, 2, C.tableTop) + R(L, top + 2, RT - L, 31, C.headBg);
+  const hb = top + 21.5;
+  const head = (x, t, anchor = 'middle') => T(x, hb, 12, C.headText, t, `text-anchor="${anchor}" font-weight="500"`);
+  s += head(COL.num, '번호') + head(COL.tag, '말머리') + head(COL.title, '제목', 'start') +
+    head(COL.writer, '글쓴이') + head(COL.date, '작성일') + head(COL.views, '조회') + head(COL.recs, '추천');
+  let y = top + 33;
+  const cellText = (x, b, t, fill, extra = '') => T(x, b, 13, fill, t, `text-anchor="middle" ${extra}`);
+
   if (notice) {
-    body += `<rect y="${y + 1}" width="${W}" height="48" fill="#fff6dc"/>` +
-      T(28, y + 32, 17, '#8a6512', '📌', '') +
-      T(56, y + 32, 17, '#6b4e0d', truncate(notice, 17, W - 90), 'font-weight="600"');
-    y += 49;
+    const b = y + 21;
+    s += R(L, y, RT - L, ROW_H, C.noticeBg);
+    s += cellText(COL.num, b, '공지', C.num) + cellText(COL.tag, b, '공지', C.tag, 'font-weight="600"');
+    s += `<circle cx="202.4" cy="${(b - 4.6).toFixed(1)}" r="7" fill="${C.noticeIcon}"/>` +
+      T(202.4, b - 0.6, 11, '#fff', '!', 'text-anchor="middle" font-weight="800"');
+    s += T(217.5, b, 14, C.noticeText, truncate(notice, 14, 400), 'font-weight="700"');
+    const adm = { name: SITE.admin, ip: '', fixed: true };
+    const aw = nickWidth(adm);
+    s += personIcon(COL.writer - aw / 2, b - 11.4) + T(COL.writer - aw / 2 + 19, b, 13, C.adminText, SITE.admin, 'font-weight="700"');
+    s += cellText(COL.date, b, SITE.must, C.num) + T(COL.views, b, 16, C.num, '–', 'text-anchor="middle"') + T(COL.recs, b, 16, C.num, '–', 'text-anchor="middle"');
+    y += ROW_H;
+    s += R(L, y - 0.5, RT - L, 1, C.rowLine);
   }
-  if (!items.length) {
-    body += `<rect y="${y}" width="${W}" height="90" fill="#fff"/>` + T(W / 2, y + 52, 18, '#8a93a8', '게시글이 없습니다', 'text-anchor="middle"');
-    y += 90;
-  }
+
+  const base = 1000000 + (hash('n|' + date) % 900000);
   items.forEach((raw, i) => {
     const cut = raw.lastIndexOf('~');                 // 제목 속 ~ 는 살리고 마지막 ~ 뒤를 닉으로
     const { tag, text } = titleParts(cut >= 0 ? raw.slice(0, cut) : raw);
-    const nick = parseNick(cut >= 0 ? raw.slice(cut + 1) : '', 'w|' + titleKey(text));
-    const { views, recs, cmts } = postStats(text, tag);
-    const rowH = 82;
-    body += `<rect y="${y}" width="${W}" height="${rowH}" fill="${i % 2 ? '#fbfcfe' : '#ffffff'}"/>`;
-    const tg = tagSVG(28, y + 34, tag);
-    body += tg.svg;
-    const cmtLabel = `[${cmts}]`;
-    const titleMax = W - 56 - tg.w - measure(cmtLabel, 17) - 10;
-    const shown = truncate(text, 20, titleMax);
-    body += T(28 + tg.w, y + 34, 20, '#18213d', shown, 'font-weight="700"');
-    body += T(28 + tg.w + measure(shown, 20) + 8, y + 34, 17, '#d8433b', cmtLabel, 'font-weight="700"');
-    const nk = nickSVG(28, y + 64, nick, 15);
-    body += nk.svg;
-    body += T(nk.end + 12, y + 63, 14, '#8a93a8', `조회 ${comma(views)}  ·  추천 ${recs}`);
-    body += `<rect y="${y + rowH - 1}" width="${W}" height="1" fill="#e6eaf2"/>`;
-    y += rowH;
+    const nick = fitNick(parseNick(cut >= 0 ? raw.slice(cut + 1) : '', titleKey(text)), 150);
+    const st = postStats(text, tag === '개념');
+    const b = y + 21.3;
+    s += cellText(COL.num, b, String(base - i), C.num);
+    s += cellText(COL.tag, b, tag === '질문' ? '질문' : '일반', C.tag, 'font-weight="600"');
+    s += R(COL.title - 0.4, b - 10.6, 10.5, 10.5, tag === '개념' ? C.sqRed : C.sqGreen);
+    const nw = nickWidth(nick);
+    const titleRight = COL.writer - nw / 2 - 22;
+    const cntLabel = st.cmts >= 2 ? `[${st.cmts}]` : '';
+    const cntW = cntLabel ? measure(cntLabel, 13) + 10 : 0;
+    const shown = truncate(text, 15, titleRight - 217 - cntW);
+    s += T(217, b, 15, C.rowTitle, shown);
+    if (cntLabel) {
+      const cx = Math.min(217 + dEst(shown, 15) + 8, titleRight - cntW + 10);
+      s += T(cx.toFixed(1), b, 13, C.cnt, cntLabel, 'font-weight="700"');
+    }
+    s += nickSVG(COL.writer - nw / 2, b, nick, 'list');
+    s += cellText(COL.date, b, timeMinus(date, i), C.cell) + cellText(COL.views, b, comma(st.views), C.cell) +
+      cellText(COL.recs, b, String(st.recs), C.cell);
+    y += ROW_H;
+    s += R(L, y - 0.5, RT - L, 1, i === items.length - 1 ? C.tableEnd : C.rowLine);
   });
-  body += T(W / 2, y + 32, 13, '#9aa3b6', '플레이어넷 · 장막 안 플레이어 전용', 'text-anchor="middle" letter-spacing="1"');
-  y += 52;
-  return frame(y, body);
+  if (!items.length) { s += T(500, y + 22, 14, C.num, '게시물이 없습니다', 'text-anchor="middle"'); y += ROW_H; }
+
+  const by = y + 11.7;
+  s += `<rect x="874" y="${by.toFixed(1)}" width="90" height="30.7" rx="3" fill="${C.navy}"/>` +
+    T(919, (by + 20.6).toFixed(1), 14, '#fff', '글쓰기', 'text-anchor="middle" font-weight="700"');
+  const f = boardFoot(by + 30.7);
+  return frame(f.h, s + f.svg, '#ffffff', BW);
 }
 
-// ───────────────────────── /f 글 ─────────────────────────
+// ───────────────────────── 글 ─────────────────────────
 function boardPost(q) {
   const { tag, text } = titleParts(q.get('t'));
-  const nick = parseNick(q.get('w'), 'w|' + titleKey(text));   // 목록 행과 같은 자동 등급
+  const nick = parseNick(q.get('w'), titleKey(text));            // 목록 행과 같은 IP
   const date = clean(q.get('d'), 20);
   const bodyText = fixPlus(clean(q.get('s'), 900));
-  const comments = String(q.get('c') ?? '').slice(0, 2000).split(';').filter(x => x.trim()).slice(0, 8);
-  const { views, recs: up, down, cmts } = postStats(text, tag);
-  const total = Math.max(cmts, comments.length);              // 목록의 [댓글수]와 일치
+  const comments = String(q.get('c') ?? '').slice(0, 2000).split(';').filter(x => x.trim()).slice(0, 10);
+  const st = postStats(text, tag === '개념');
 
-  let y = 67;
-  let out = header('플레이어넷', '전체글');
-  out += `<rect y="${y}" width="${W}" height="2000" fill="#ffffff"/>`; // 본문 배경(잘라서 씀)
-  y += 22;
-  // 제목
-  const tg = tagSVG(28, y + 26, tag, 15);
-  const tLines = wrap(text, 26, W - 56 - tg.w, 3);
-  out += tg.svg;
-  tLines.forEach((ln, i) => { out += T(28 + (i === 0 ? tg.w : 0), y + 30 + i * 38, 26, '#18213d', ln, 'font-weight="800" letter-spacing="-0.6"'); });
-  y += 30 + (tLines.length - 1) * 38 + 22;
-  // 메타
-  const nk = nickSVG(28, y + 18, nick, 16);
-  out += nk.svg;
-  out += T(nk.end + 12, y + 17, 14, '#8a93a8', date ? `⏱ ${date}` : '');
-  out += T(W - 28, y + 17, 14, '#8a93a8', `👁 ${comma(views)}   💬 ${total}`, 'text-anchor="end"');
-  y += 36;
-  out += `<rect x="28" y="${y}" width="${W - 56}" height="1" fill="#e2e7f0"/>`;
-  y += 34;
-  // 본문
-  const bLines = wrap(bodyText || ' ', 20, W - 56, 18);
-  bLines.forEach((ln, i) => { out += T(28, y + i * 33, 20, '#2b3142', ln); });
-  y += bLines.length * 33 + 14;
-  // 추천
-  const pillW = 120;
-  const cx = W / 2;
-  out += `<rect x="${cx - pillW - 8}" y="${y}" width="${pillW}" height="46" rx="23" fill="#fff" stroke="#2f6fdb" stroke-width="2"/>` +
-    T(cx - pillW / 2 - 8, y + 30, 18, '#2f6fdb', `👍 ${up}`, 'text-anchor="middle" font-weight="700"') +
-    `<rect x="${cx + 8}" y="${y}" width="${pillW}" height="46" rx="23" fill="#fff" stroke="#9aa3b6" stroke-width="2"/>` +
-    T(cx + pillW / 2 + 8, y + 30, 18, '#6c7489', `👎 ${down}`, 'text-anchor="middle" font-weight="700"');
-  y += 74;
-  // 댓글
-  out += `<rect y="${y}" width="${W}" height="1" fill="#e2e7f0"/>`;
-  out += T(28, y + 36, 17, '#18213d', '댓글', 'font-weight="700"') +
-    T(28 + measure('댓글', 17) + 6, y + 36, 17, '#d8433b', String(total), 'font-weight="700"');
-  y += 54;
-  if (!comments.length) { out += T(28, y + 10, 16, '#9aa3b6', '아직 댓글이 없습니다'); y += 40; }
-  comments.forEach(raw => {
-    const reply = /^\s*(↳|>|ㄴ)/.test(raw);
-    const r = raw.replace(/^\s*(↳|>|ㄴ)\s*/, '');
-    const cut = r.indexOf('~');
+  let s = boardHead();
+  // 제목(길면 2줄)
+  const tLines = wrap(text, 22, RT - L, 2);
+  let y = Y0 + 184;
+  tLines.forEach((ln, i) => { s += T(L, y + i * 30, 22, C.postTitle, ln, 'font-weight="800"'); });
+  y += (tLines.length - 1) * 30;
+  // 작성자 · 날짜 · 조회 · 추천
+  const mb = y + 31.7;
+  s += nickSVG(L, mb, nick, 'post');
+  const meta = `· ${date ? date + ' · ' : ''}조회 ${comma(st.views)} · 추천 ${st.recs}`;
+  s += T((L + nickWidth(nick) + 12).toFixed(1), mb, 13, C.meta, meta);
+  const sep1 = mb + 11.6;
+  s += R(L, sep1, RT - L, 1, C.sep);
+  // 본문 — 원본처럼 dEst 기준으로 줄을 끊는다
+  const bLines = wrapBy(bodyText || ' ', t => dEst(t, 17) <= RT - L, 14);
+  const b0 = sep1 + 22.2;
+  bLines.forEach((ln, i) => { s += T(L, (b0 + i * 30.6).toFixed(1), 17, C.body, ln); });
+  const sep2 = b0 + (bLines.length - 1) * 30.6 + 17;
+  s += R(L, sep2.toFixed(1), RT - L, 1, C.sep);
+  // 추천·비추 알약
+  const py = sep2 + 6.4;
+  const pill = (x, bg, line, fg, label) =>
+    `<rect x="${x + 0.5}" y="${(py + 0.5).toFixed(1)}" width="109" height="41.3" rx="20.6" fill="${bg}" stroke="${line}"/>` +
+    T(x + 55, (py + 27.6).toFixed(1), 15, fg, label, 'text-anchor="middle" font-weight="700"');
+  s += pill(384, C.upBg, C.upLine, C.upText, `▲ ${st.recs}`) + pill(506, C.downBg, C.downLine, C.downText, `▼ ${st.down}`);
+  // 댓글 머리
+  const lb = py + 51;
+  s += R(35, (lb - 15).toFixed(1), 3.2, 15, C.navy) +
+    T(50, lb.toFixed(1), 15, C.label, `댓글 ${comments.length}`, 'font-weight="700"');
+  const lsep = lb + 9.3;
+  s += R(L, lsep.toFixed(1), RT - L, 1, C.sep);
+  // 댓글 줄
+  let cb = lsep + 26;
+  let bottom = lsep + 1;
+  comments.forEach((raw, i) => {
+    const reply = /^\s*(↳|ㄴ|>)/.test(raw);
+    const r = raw.replace(/^\s*(↳|ㄴ|>)\s*/, '');
+    const cut = r.indexOf('~');                       // 닉~댓글: 첫 ~ 앞이 닉
     const ct = fixPlus(clean(cut >= 0 ? r.slice(cut + 1) : r, 200));
-    const cn = parseNick(cut >= 0 ? r.slice(0, cut) : 'ㅇㅇ', ct);
-    const indent = reply ? 58 : 28;
-    const lines = wrap(ct, 18, W - indent - 28, 4);
-    const boxH = 34 + lines.length * 28 + 14;
-    if (reply) {
-      out += `<rect x="${indent - 14}" y="${y - 8}" width="${W - indent - 14}" height="${boxH}" rx="10" fill="#f3f5fa"/>` +
-        T(30, y + 16, 18, '#9aa3b6', '↳');
-    }
-    const nn = nickSVG(indent, y + 16, cn, 15);
-    out += nn.svg;
-    lines.forEach((ln, i) => { out += T(indent, y + 46 + i * 28, 18, '#2b3142', ln); });
-    y += boxH + (reply ? 8 : 4);
-    if (!reply) out += `<rect x="28" y="${y - 6}" width="${W - 56}" height="1" fill="#eef1f6"/>`;
+    const cn = parseNick(cut >= 0 ? r.slice(0, cut) : 'ㅇㅇ', 'c' + i + ct);
+    let x = L;
+    if (reply) { s += T(38, cb.toFixed(1), 13, C.reply, 'ㄴ'); x = 62; }
+    s += nickSVG(x, cb.toFixed(1), cn, 'post');
+    const tx = x + nickWidth(cn) + 20;
+    s += T(tx.toFixed(1), cb.toFixed(1), 15, C.cmtText, truncate(ct, 15, RT - tx));
+    s += R(L, (cb + 7).toFixed(1), RT - L, 1, C.rowLine);
+    bottom = cb + 8;
+    cb += 28;
   });
-  if (total > comments.length) {                              // 나머지 댓글은 접힌 것처럼
-    y += 6;
-    out += `<rect x="28" y="${y}" width="${W - 56}" height="44" rx="10" fill="#f3f5fa"/>` +
-      T(W / 2, y + 28, 15, '#56607a', `댓글 ${total - comments.length}개 더보기 ▾`, 'text-anchor="middle" font-weight="600"');
-    y += 44;
-  }
-  y += 18;
-  out += T(W / 2, y + 16, 13, '#9aa3b6', '플레이어넷 · 장막 안 플레이어 전용', 'text-anchor="middle" letter-spacing="1"');
-  y += 40;
-  return frame(y, out, '#ffffff');
+  const f = boardFoot(bottom);
+  return frame(f.h, s + f.svg, '#ffffff', BW);
 }
 
 // ───────────────────────── /s 공략 현황판 ─────────────────────────
@@ -450,11 +530,11 @@ function statusBoard(q) {
 function help() {
   const lines = [
     ['/ 목록', 'd=7/6+14:20 & o=카더라주의 & l=!제목~닉;?제목~*닉;제목~닉'],
-    ['/ 글', 't=제목 & w=ㅇㅇ(등급 자동, ㅇㅇ@C+로 지정) & d=날짜 & s=본문 & c=ㅇㅇ~댓글;↳ㅇㅇ~반박'],
+    ['/ 글', 't=제목 & w=닉 & d=날짜 & s=본문 & c=ㅇㅇ~댓글;↳ㅇㅇ~반박'],
     ['/s 현황판', 'd=날짜 & z=0120(서남동북 0/1/2) & u=중 & k=*이름~1;하준~1 & h=공지'],
     ['공통', '띄어쓰기는 +, 값 안에 & # % ; ~ ( ) 금지']
   ];
-  let s = header('성좌게임 SVG 워커 · sg', 'v3');
+  let s = header('성좌게임 SVG 워커 · sg', 'v4');
   let y = 110;
   lines.forEach(([k, v]) => {
     s += T(28, y, 17, '#18213d', k, 'font-weight="800"');
